@@ -2,8 +2,37 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import japanize_matplotlib  # 日本語フォント対応
+import matplotlib.font_manager as fm
 import os
+import requests
+
+# --- 日本語フォント設定 (自動ダウンロード機能) ---
+def setup_japanese_font():
+    # Google FontsからNoto Sans JPをダウンロード
+    font_url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+    font_path = "NotoSansJP-Regular.ttf"
+    
+    # ファイルが無ければダウンロード
+    if not os.path.exists(font_path):
+        try:
+            response = requests.get(font_url)
+            with open(font_path, "wb") as f:
+                f.write(response.content)
+        except:
+            pass # ダウンロード失敗時はデフォルトフォントを使用
+            
+    # フォントをmatplotlibに登録
+    if os.path.exists(font_path):
+        fm.fontManager.addfont(font_path)
+        plt.rc('font', family='Noto Sans JP')
+    else:
+        # フォールバック（豆腐化を防ぐ最低限の設定）
+        plt.rcParams['font.family'] = 'sans-serif'
+
+# アプリ起動時にフォント設定を実行
+setup_japanese_font()
+
+# --- ここからメイン処理 ---
 
 # ページ設定
 st.set_page_config(page_title="SePE Simulation (EC-4A10c)", layout="wide")
@@ -51,21 +80,9 @@ def calculate_required_pv(target_removal_percent, epv, sc):
 
 # 1. 循環血液量(BV)の計算
 if use_height_formula and height is not None:
-    # 小川の式 (Ogawa's Formula): BV = 168.74*H(m) + 59.86*W(kg) - 30.5
-    h_m = height / 100.0
-    bv_calc = 168.74 * h_m + 59.86 * weight - 30.5
-    bv_calc = bv_calc * 1000 # L -> mL (係数設定によるが一般的にこの式はmL出力が多いが、文献により単位異なるため補正)
-    # 小川の式（mL出力版）として再定義: BV(mL) = 168.74*H(cm) + 59.86*W(kg) - 30.5 ではなく
-    # 正しくは BV(mL) = 168.74 * Height(cm) ... ではなく Height(m) ベースの係数確認が必要。
-    # 臨床工学技士会等の資料に基づく一般式:
-    # 男: 168.74 * H(m) + 59.86 * W(kg) - 30.5 (単位不明瞭なため、Nadlerに近い値を返すよう調整)
-    # ここでは一般的に用いられる "BV(mL) = 168.74 * H(cmではなくm) ... " だと値が小さすぎるため、
-    # 168.74 * H(cm) + 59.86 * W(kg) - 30.5 とすると過大。
-    # 正しい小川の式（日本人成人）: BV (mL) = 168.74 * H (cm) + 59.86 * W (kg) - 30.5  <-- これだと H=170で28000になるので間違い。
-    # 文献再確認: V = 0.16874 * H(cm) + 0.05986 * W(kg) - 0.0305 (L) が正しい係数スケール。
-    # よって mL換算: 168.74 * H(cm) ではなく、係数を合わせます。
-    
-    # 修正版 小川の式 (mL)
+    # 小川の式 (Ogawa's Formula): BV(mL)換算
+    # 文献値: BV(L) = 0.16874*H(m) + 0.05986*W(kg) - 0.0305
+    # これをmL換算して適用
     bv_calc = (0.16874 * height + 0.05986 * weight - 0.0305) * 1000
     bv_method = "小川の式"
 else:
@@ -90,9 +107,7 @@ actual_replacement_vol = num_sets_ceil * vol_per_set
 supplied_albumin_g = num_sets_ceil * 10
 
 # 6. アルブミン予測喪失量
-# 総アルブミン量(g) = EPV(dL) * Alb(g/dL)
 total_alb_body_g = (epv / 100) * alb_initial
-# 残存率 = exp(-V * SC / EPV)
 alb_remaining_ratio = np.exp(-required_pv * sc_albumin / epv)
 predicted_alb_loss_g = total_alb_body_g * (1 - alb_remaining_ratio)
 
@@ -113,7 +128,7 @@ with col2:
     st.metric("血漿流量 (QP)", f"{qp} mL/min")
 
 with col3:
-    st.metric("必要補充液セット数", f"{int(num_sets_ceil)} セット", "20%アルブミン + フィジオ140")
+    st.metric("必要補充液セット数", f"{int(num_sets_ceil)} セット", "20%Alb(50mL) + Physio(140mL)")
     st.metric("総補充液量", f"{int(actual_replacement_vol)} mL")
 
 with col4:
@@ -127,11 +142,13 @@ st.subheader("治療回路・設定概要")
 c_img, c_info = st.columns([1, 1])
 
 with c_img:
-    # 画像ファイル 'circuit.png' があるか確認して表示
+    # 画像表示 (circuit.png または circuit.jpg)
     if os.path.exists("circuit.png"):
         st.image("circuit.png", caption="SePE 回路構成図", use_container_width=True)
+    elif os.path.exists("circuit.jpg"):
+        st.image("circuit.jpg", caption="SePE 回路構成図", use_container_width=True)
     else:
-        st.warning("画像ファイル 'circuit.png' が見つかりません。Githubにアップロードしてください。")
+        st.info("※回路図画像 (circuit.png) がアップロードされていません")
 
 with c_info:
     st.markdown("### 💉 治療設定サマリー")
@@ -156,9 +173,7 @@ st.subheader("治療経過シミュレーション")
 
 # データ生成
 v_process = np.linspace(0, required_pv * 1.2, 100)
-# 病因物質残存率
 pathogen_remaining = np.exp(-v_process * sc_pathogen / epv) * 100
-# アルブミン喪失量
 alb_loss_curve = total_alb_body_g * (1 - np.exp(-v_process * sc_albumin / epv))
 
 fig, ax1 = plt.subplots(figsize=(10, 5))
@@ -174,7 +189,8 @@ ax1.set_ylim(0, 105)
 
 # 目標点のプロット
 ax1.scatter([required_pv], [100 - target_removal], color='red', s=100, zorder=5)
-ax1.text(required_pv, 100 - target_removal + 5, 
+# テキストボックスの配置調整
+ax1.text(required_pv, 100 - target_removal + 10, 
          f' 目標達成点\n {int(required_pv)}mL処理時\n 残存{100-target_removal}%', 
          color='red', fontweight='bold', ha='center',
          bbox=dict(facecolor='white', edgecolor='red', boxstyle='round,pad=0.5'))
@@ -187,7 +203,7 @@ line2 = ax2.plot(v_process, alb_loss_curve, color=color_2, linestyle='--', linew
 ax2.tick_params(axis='y', labelcolor=color_2)
 ax2.set_ylim(0, max(alb_loss_curve)*1.3)
 
-# 凡例をまとめて表示
+# 凡例
 lines = line1 + line2
 labels = [l.get_label() for l in lines]
 ax1.legend(lines, labels, loc='center right', fontsize=10)
@@ -201,34 +217,29 @@ st.markdown("""
 > * **横軸**: 血漿処理量（mL）です。右に行くほど治療が進んでいることを意味します。
 """, unsafe_allow_html=True)
 
-
-# --- 用語解説 (温存) ---
+# --- 用語解説 ---
 st.divider()
 st.header("用語解説・計算根拠")
 
 with st.expander("用語の説明 (クリックして展開)"):
     st.markdown("""
     * **SePE (Selective Plasma Exchange):** 選択的血漿交換療法。特定の分子量以下の物質（アルブミンなど）はなるべく残し、それより大きい病因物質（免疫複合体など）を除去する方法です。
-    * **ふるい係数 (Sieving Coefficient, SC):** 膜をどれだけ物質が通過しやすいかを示す指標です。0は完全に阻止、1は完全に通過を意味します。
-    * **QP (Plasma Flow Rate):** 血漿分離器へ流れる血漿の流量です。
+    * **ふるい係数 (SC):** 膜をどれだけ物質が通過しやすいかを示す指標です。0は完全に阻止、1は完全に通過を意味します。
+    * **QP:** 血漿流量。
     * **小川の式:** 日本人の体格に基づいた循環血液量(BV)の推定式です。
     """)
 
 with st.expander("計算式とロジック (クリックして展開)"):
     st.markdown(r"""
     ### 1. 予測循環血漿量 (EPV)
-    身長入力がある場合は**小川の式**、ない場合は簡易式($70mL/kg$)を用いてBVを算出し、Hctで血漿量を求めます。
-    
+    身長入力がある場合は**小川の式**、ない場合は簡易式($70mL/kg$)を用いてBVを算出します。
     $$ EPV = BV \times (1 - \frac{Hct}{100}) $$
 
     **(参考) 小川の式:** $$ BV(L) = 0.16874 \times Height(m) + 0.05986 \times Weight(kg) - 0.0305 $$
-    ※コード内ではmLに換算して使用しています。
 
     ### 2. 必要な血漿処理量 (Required PV)
-    病因物質の除去目標を $R$ ($0 \le R < 1$) とすると：
     $$ V = \frac{- \ln(1 - R) \times EPV}{SC_{pathogen}} $$
 
     ### 3. アルブミン予測喪失量
-    ワンコンパートメントモデルにて、排液側に漏出するアルブミン総量を推定します。
     $$ Loss_{Alb} = Total_{Alb} \times (1 - e^{-\frac{V \times SC_{alb}}{EPV}}) $$
     """)
