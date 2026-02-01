@@ -4,33 +4,32 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import os
-import requests
+import urllib.request  # 標準ライブラリでダウンロード機能を使用
 
-# --- フォント設定 (最強版) ---
+# --- フォント設定 (完全自動ダウンロード版) ---
 def setup_japanese_font():
     # フォントファイル名
     font_filename = "NotoSansJP-Regular.ttf"
     
-    # ファイルがなければGoogle Fontsからダウンロード
+    # ファイルがなければダウンロードする
     if not os.path.exists(font_filename):
-        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+        # GitHubのRawデータへの直接リンク
+        url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
         try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                with open(font_filename, "wb") as f:
-                    f.write(response.content)
-        except:
-            pass # ダウンロード失敗時はデフォルトフォント
+            # 標準ライブラリでダウンロード (ライブラリ追加不要)
+            urllib.request.urlretrieve(url, font_filename)
+        except Exception as e:
+            # 万が一失敗した場合はエラーを表示せず英語フォントで進める
+            pass
 
     # フォントをmatplotlibに登録して適用
     if os.path.exists(font_filename):
         fm.fontManager.addfont(font_filename)
         plt.rc('font', family='Noto Sans JP')
     else:
-        # 万が一失敗した場合は英語表記（豆腐化防止）
         plt.rc('font', family='sans-serif')
 
-# アプリ起動時にフォント設定を実行
+# アプリ起動時に実行
 setup_japanese_font()
 
 # --- ここからメイン処理 ---
@@ -144,8 +143,10 @@ with c_img:
     # 画像表示 (circuit.png があれば表示)
     if os.path.exists("circuit.png"):
         st.image("circuit.png", caption="SePE 回路構成図", use_container_width=True)
+    elif os.path.exists("circuit.jpg"):
+        st.image("circuit.jpg", caption="SePE 回路構成図", use_container_width=True)
     else:
-        st.info("※回路図 (circuit.png) がまだアップロードされていません")
+        st.info("※回路図画像 (circuit.png) がアップロードされていません")
 
 with c_info:
     st.markdown("### 💉 治療設定サマリー")
