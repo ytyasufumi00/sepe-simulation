@@ -2,37 +2,11 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.font_manager as fm
 import os
-import urllib.request
 
-# --- フォント設定 (修正・完全版) ---
-def setup_japanese_font():
-    # キャッシュ対策でファイル名を変更
-    font_filename = "NotoSansJP-Regular_v2.ttf"
-    
-    # ファイルがなければ正しいURLから取得
-    if not os.path.exists(font_filename):
-        # 修正: raw.githubusercontent.com を使用
-        url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
-        try:
-            with urllib.request.urlopen(url) as response, open(font_filename, 'wb') as out_file:
-                out_file.write(response.read())
-        except Exception as e:
-            st.error(f"フォントダウンロードエラー: {e}")
-
-    # フォント設定
-    if os.path.exists(font_filename):
-        try:
-            fm.fontManager.addfont(font_filename)
-            plt.rc('font', family='Noto Sans JP')
-        except Exception as e:
-            st.warning(f"フォント適用エラー: {e}")
-    else:
-        # 万が一失敗した場合は英語フォント
-        plt.rc('font', family='sans-serif')
-
-setup_japanese_font()
+# --- フォント設定 (システムインストール版) ---
+# packages.txt で入れた 'fonts-noto-cjk' を使用します
+plt.rcParams['font.family'] = 'Noto Sans CJK JP'
 
 # --- メイン処理 ---
 st.set_page_config(page_title="SePE Simulation (EC-4A10c)", layout="wide")
