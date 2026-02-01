@@ -6,28 +6,29 @@ import matplotlib.font_manager as fm
 import os
 import requests
 
-# --- 日本語フォント設定 (自動ダウンロード機能) ---
+# --- フォント設定 (最強版) ---
 def setup_japanese_font():
-    # Google FontsからNoto Sans JPをダウンロード
-    font_url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
-    font_path = "NotoSansJP-Regular.ttf"
+    # フォントファイル名
+    font_filename = "NotoSansJP-Regular.ttf"
     
-    # ファイルが無ければダウンロード
-    if not os.path.exists(font_path):
+    # ファイルがなければGoogle Fontsからダウンロード
+    if not os.path.exists(font_filename):
+        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
         try:
-            response = requests.get(font_url)
-            with open(font_path, "wb") as f:
-                f.write(response.content)
+            response = requests.get(url)
+            if response.status_code == 200:
+                with open(font_filename, "wb") as f:
+                    f.write(response.content)
         except:
-            pass # ダウンロード失敗時はデフォルトフォントを使用
-            
-    # フォントをmatplotlibに登録
-    if os.path.exists(font_path):
-        fm.fontManager.addfont(font_path)
+            pass # ダウンロード失敗時はデフォルトフォント
+
+    # フォントをmatplotlibに登録して適用
+    if os.path.exists(font_filename):
+        fm.fontManager.addfont(font_filename)
         plt.rc('font', family='Noto Sans JP')
     else:
-        # フォールバック（豆腐化を防ぐ最低限の設定）
-        plt.rcParams['font.family'] = 'sans-serif'
+        # 万が一失敗した場合は英語表記（豆腐化防止）
+        plt.rc('font', family='sans-serif')
 
 # アプリ起動時にフォント設定を実行
 setup_japanese_font()
@@ -43,7 +44,7 @@ st.sidebar.header("患者・治療パラメータ設定")
 # 患者情報
 st.sidebar.subheader("患者情報")
 
-# 身長入力の任意化ロジック
+# 身長入力の任意化
 use_height_formula = st.sidebar.checkbox("身長を入力して計算（小川の式）", value=True)
 
 if use_height_formula:
@@ -82,7 +83,6 @@ def calculate_required_pv(target_removal_percent, epv, sc):
 if use_height_formula and height is not None:
     # 小川の式 (Ogawa's Formula): BV(mL)換算
     # 文献値: BV(L) = 0.16874*H(m) + 0.05986*W(kg) - 0.0305
-    # これをmL換算して適用
     bv_calc = (0.16874 * height + 0.05986 * weight - 0.0305) * 1000
     bv_method = "小川の式"
 else:
@@ -110,7 +110,6 @@ supplied_albumin_g = num_sets_ceil * 10
 total_alb_body_g = (epv / 100) * alb_initial
 alb_remaining_ratio = np.exp(-required_pv * sc_albumin / epv)
 predicted_alb_loss_g = total_alb_body_g * (1 - alb_remaining_ratio)
-
 
 # --- メイン画面表示 ---
 
@@ -142,13 +141,11 @@ st.subheader("治療回路・設定概要")
 c_img, c_info = st.columns([1, 1])
 
 with c_img:
-    # 画像表示 (circuit.png または circuit.jpg)
+    # 画像表示 (circuit.png があれば表示)
     if os.path.exists("circuit.png"):
         st.image("circuit.png", caption="SePE 回路構成図", use_container_width=True)
-    elif os.path.exists("circuit.jpg"):
-        st.image("circuit.jpg", caption="SePE 回路構成図", use_container_width=True)
     else:
-        st.info("※回路図画像 (circuit.png) がアップロードされていません")
+        st.info("※回路図 (circuit.png) がまだアップロードされていません")
 
 with c_info:
     st.markdown("### 💉 治療設定サマリー")
@@ -187,11 +184,10 @@ ax1.tick_params(axis='y', labelcolor=color_1)
 ax1.grid(True, which='both', linestyle='--', alpha=0.5)
 ax1.set_ylim(0, 105)
 
-# 目標点のプロット
+# 目標点のプロットとテキスト
 ax1.scatter([required_pv], [100 - target_removal], color='red', s=100, zorder=5)
-# テキストボックスの配置調整
 ax1.text(required_pv, 100 - target_removal + 10, 
-         f' 目標達成点\n {int(required_pv)}mL処理時\n 残存{100-target_removal}%', 
+         f' 目標達成点\n {int(required_pv)}mL処理\n 残存{100-target_removal}%', 
          color='red', fontweight='bold', ha='center',
          bbox=dict(facecolor='white', edgecolor='red', boxstyle='round,pad=0.5'))
 
@@ -223,9 +219,8 @@ st.header("用語解説・計算根拠")
 
 with st.expander("用語の説明 (クリックして展開)"):
     st.markdown("""
-    * **SePE (Selective Plasma Exchange):** 選択的血漿交換療法。特定の分子量以下の物質（アルブミンなど）はなるべく残し、それより大きい病因物質（免疫複合体など）を除去する方法です。
-    * **ふるい係数 (SC):** 膜をどれだけ物質が通過しやすいかを示す指標です。0は完全に阻止、1は完全に通過を意味します。
-    * **QP:** 血漿流量。
+    * **SePE (Selective Plasma Exchange):** 選択的血漿交換療法。
+    * **ふるい係数 (SC):** 膜をどれだけ物質が通過しやすいかを示す指標です。
     * **小川の式:** 日本人の体格に基づいた循環血液量(BV)の推定式です。
     """)
 
