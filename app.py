@@ -6,24 +6,30 @@ import matplotlib.font_manager as fm
 import os
 import urllib.request
 
-# --- フォント設定 (完全自動ダウンロード版) ---
+# --- フォント設定 (修正・完全版) ---
 def setup_japanese_font():
-    font_filename = "NotoSansJP-Regular.ttf"
+    # キャッシュ対策でファイル名を変更
+    font_filename = "NotoSansJP-Regular_v2.ttf"
     
-    # ファイルがなければGoogleから自動取得 (urllib使用)
+    # ファイルがなければ正しいURLから取得
     if not os.path.exists(font_filename):
-        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+        # 修正: raw.githubusercontent.com を使用
+        url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
         try:
             with urllib.request.urlopen(url) as response, open(font_filename, 'wb') as out_file:
                 out_file.write(response.read())
-        except:
-            pass
+        except Exception as e:
+            st.error(f"フォントダウンロードエラー: {e}")
 
     # フォント設定
     if os.path.exists(font_filename):
-        fm.fontManager.addfont(font_filename)
-        plt.rc('font', family='Noto Sans JP')
+        try:
+            fm.fontManager.addfont(font_filename)
+            plt.rc('font', family='Noto Sans JP')
+        except Exception as e:
+            st.warning(f"フォント適用エラー: {e}")
     else:
+        # 万が一失敗した場合は英語フォント
         plt.rc('font', family='sans-serif')
 
 setup_japanese_font()
@@ -51,6 +57,7 @@ target_removal = st.sidebar.slider("病因物質の除去目標 (%)", 30, 95, 60
 qp = st.sidebar.number_input("血漿流量 QP (mL/min)", value=30.0, step=5.0)
 
 st.sidebar.subheader("膜特性 (Evacure EC-4A10c)")
+st.sidebar.markdown("<small>※in vivoでの目詰まりや安全域を考慮して調整</small>", unsafe_allow_html=True)
 sc_pathogen = st.sidebar.slider("病因物質SC", 0.0, 1.0, 0.90, 0.01)
 sc_albumin = st.sidebar.slider("アルブミンSC", 0.0, 1.0, 0.65, 0.01)
 
@@ -99,7 +106,7 @@ with c_img:
     elif os.path.exists("circuit.jpg"):
         st.image("circuit.jpg", caption="SePE 回路構成図", use_container_width=True)
     else:
-        st.info("※回路図画像がアップロードされていません (circuit.png)")
+        st.info("※回路図画像がアップロードされていません")
 
 with c_info:
     st.info(f"""
@@ -118,20 +125,37 @@ alb_loss_curve = total_alb_body_g * (1 - np.exp(-v_process * sc_albumin / epv))
 
 fig, ax1 = plt.subplots(figsize=(10, 5))
 color_1 = 'tab:red'
-ax1.set_xlabel('血漿処理量 (mL)')
-ax1.set_ylabel('病因物質 残存率 (%)', color=color_1, fontweight='bold')
-ax1.plot(v_process, pathogen_remaining, color=color_1, linewidth=3, label='病因物質残存率')
+ax1.set_xlabel('血漿処理量 (mL)', fontsize=12)
+ax1.set_ylabel('病因物質 残存率 (%)', color=color_1, fontweight='bold', fontsize=12)
+line1 = ax1.plot(v_process, pathogen_remaining, color=color_1, linewidth=3, label='病因物質残存率')
 ax1.tick_params(axis='y', labelcolor=color_1)
 ax1.grid(True, linestyle='--', alpha=0.5)
 ax1.set_ylim(0, 105)
 
 ax1.scatter([required_pv], [100 - target_removal], color='red', s=100, zorder=5)
-ax1.text(required_pv, 100 - target_removal + 10, f'目標達成\n{int(required_pv)}mL', color='red', ha='center', fontweight='bold')
+ax1.text(required_pv, 100 - target_removal + 10, f'目標達成\n{int(required_pv)}mL', color='red', ha='center', fontweight='bold',
+         bbox=dict(facecolor='white', edgecolor='red', boxstyle='round,pad=0.5'))
 
 ax2 = ax1.twinx()
 color_2 = 'tab:blue'
-ax2.set_ylabel('累積アルブミン喪失量 (g)', color=color_2, fontweight='bold')
-ax2.plot(v_process, alb_loss_curve, color=color_2, linestyle='--', linewidth=2.5, label='Alb喪失量')
+ax2.set_ylabel('累積アルブミン喪失量 (g)', color=color_2, fontweight='bold', fontsize=12)
+line2 = ax2.plot(v_process, alb_loss_curve, color=color_2, linestyle='--', linewidth=2.5, label='Alb喪失量')
 ax2.tick_params(axis='y', labelcolor=color_2)
+ax2.set_ylim(0, max(alb_loss_curve)*1.3)
+
+# 凡例
+lines = line1 + line2
+labels = [l.get_label() for l in lines]
+ax1.legend(lines, labels, loc='center right', fontsize=10)
 
 st.pyplot(fig)
+
+# --- 用語解説 ---
+st.divider()
+st.header("用語解説・計算根拠")
+with st.expander("用語の説明・計算式 (クリックして展開)"):
+    st.markdown(r"""
+    * **SePE (Selective Plasma Exchange):** 選択的血漿交換療法。
+    * **ふるい係数 (SC):** 膜透過性。
+    * **小川の式:** $BV(L) = 0.16874 \times H(m) + 0.05986 \times W(kg) - 0.0305$
+    """)
