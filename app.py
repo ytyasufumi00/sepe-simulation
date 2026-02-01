@@ -13,11 +13,12 @@ def setup_japanese_font():
     
     # ファイルがなければダウンロードする
     if not os.path.exists(font_filename):
-        # GitHubのRawデータへの直接リンク
-        url = "https://raw.githubusercontent.com/google/fonts/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
+        # Google Fontsの正規データを取得
+        url = "https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP-Regular.ttf"
         try:
             # 標準ライブラリでダウンロード (ライブラリ追加不要)
-            urllib.request.urlretrieve(url, font_filename)
+            with urllib.request.urlopen(url) as response, open(font_filename, 'wb') as out_file:
+                out_file.write(response.read())
         except Exception as e:
             # 万が一失敗した場合はエラーを表示せず英語フォントで進める
             pass
@@ -140,7 +141,7 @@ st.subheader("治療回路・設定概要")
 c_img, c_info = st.columns([1, 1])
 
 with c_img:
-    # 画像表示 (circuit.png があれば表示)
+    # 画像表示 (circuit.png または jpg)
     if os.path.exists("circuit.png"):
         st.image("circuit.png", caption="SePE 回路構成図", use_container_width=True)
     elif os.path.exists("circuit.jpg"):
