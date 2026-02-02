@@ -19,18 +19,22 @@ st.sidebar.subheader("患者情報")
 height = st.sidebar.number_input("身長 (cm) ※任意", value=0.0, step=0.1, help="入力なし(0.0)の場合は簡易式(70mL/kg)が適用されます。")
 weight = st.sidebar.number_input("体重 (kg)", value=65.0, step=0.1)
 hct = st.sidebar.number_input("血中ヘマトクリット値 (%)", value=30.0, step=0.1)
-alb_initial = st.sidebar.number_input("血清アルブミン値 (g/dL)", value=4.0, step=0.1) # デフォルトを4.0に変更
+alb_initial = st.sidebar.number_input("血清アルブミン値 (g/dL)", value=4.0, step=0.1)
 
 # 2. 治療目標
 st.sidebar.subheader("治療目標")
 target_removal = st.sidebar.slider("病因物質の除去目標 (%)", 30, 95, 60, step=5)
 qp = st.sidebar.number_input("血漿流量 QP (mL/min)", value=30.0, step=5.0)
 
-# 3. 膜特性
+# 3. アルブミンバランス調整 (新機能)
+st.sidebar.subheader("アルブミン収支設定")
+target_balance_ratio = st.sidebar.slider("収支目標 (対喪失量 %)", -10, 15, 5, step=1, help="予想喪失量に対して、どれくらい増減させて補充するかを設定します。デフォルトは安全のため+5%です。")
+
+# 4. 膜特性
 st.sidebar.subheader("膜特性 (Evacure EC-4A10c)")
 st.sidebar.markdown("<small>※in vivoでの目詰まりや安全域を考慮して調整</small>", unsafe_allow_html=True)
 sc_pathogen = st.sidebar.slider("病因物質SC", 0.0, 1.0, 0.90, 0.01)
-sc_albumin = st.sidebar.slider("アルブミンSC", 0.0, 1.0, 0.50, 0.01) # デフォルトを0.5に変更
+sc_albumin = st.sidebar.slider("アルブミンSC", 0.0, 1.0, 0.50, 0.01)
 
 # --- 計算ロジック ---
 
@@ -57,14 +61,14 @@ treatment_time_min = required_pv / qp if qp > 0 else 0
 
 # --- 💡 安全性重視のレシピ設計ロジック ---
 
-# 1. 目標濃度の設定（ここを修正）
-# 以前の「平均喪失」ではなく、「現在のAlb値を維持するために必要な濃度」を基準にする
+# 1. 目標濃度の設定 (スライダー反映)
 # 基準喪失濃度(g/dL) = 患者Alb * SC
 est_loss_conc_g_dl = alb_initial * sc_albumin
-est_loss_conc_percent = est_loss_conc_g_dl # g/dL = % (近似)
+est_loss_conc_percent = est_loss_conc_g_dl 
 
-# 安全目標: 喪失濃度 + 5%
-target_repl_conc_percent = est_loss_conc_percent * 1.05
+# 目標補充濃度 = 基準喪失濃度 * (1 + スライダー設定/100)
+# 例: +5%なら 1.05倍、-10%なら 0.90倍
+target_repl_conc_percent = est_loss_conc_percent * (1 + target_balance_ratio / 100.0)
 
 # 2. 使用可能な「セットの型」を定義
 recipe_patterns = [
@@ -81,8 +85,6 @@ recipe_patterns = [
 
 # 3. 最適な組み合わせの探索
 best_plan = None
-min_diff = float('inf')
-
 # 概算セット数
 approx_sets = int(np.ceil(required_pv / 500))
 search_sets_range = range(max(1, approx_sets), approx_sets + 2)
@@ -108,13 +110,10 @@ for n_total_sets in search_sets_range:
                 # 補充液の平均濃度
                 avg_repl_conc = (total_alb / total_vol) * 100
                 
-                # 判定基準: 「目標濃度 (Loss+5%)」にどれだけ近いか
-                # 許容範囲: 目標 ±10% (厳しすぎると解なしになるため)
-                # 目標: target_repl_conc_percent
-                
+                # 目標濃度との乖離
                 diff_from_target = abs(avg_repl_conc - target_repl_conc_percent)
                 
-                # スコアリング (目標濃度との乖離 + 容量の無駄)
+                # スコアリング
                 score = diff_from_target * 2 + abs(total_vol - required_pv)/200
                 
                 found_plans.append({
@@ -141,7 +140,6 @@ actual_replacement_vol = best_plan["total_vol"]
 supplied_albumin_g = best_plan["total_alb"]
 
 # --- シミュレーション (ステップ計算) ---
-# 実際にこの補充液を使った場合の推移を正確に計算
 steps = 100
 dt_vol = required_pv / steps
 current_alb_mass = (epv / 100) * alb_initial
@@ -155,20 +153,13 @@ cum_loss = 0
 avg_repl_conc_g_dl = supplied_albumin_g / actual_replacement_vol # g/dL
 
 for _ in range(steps):
-    # 1ステップの排液量 = 補充量 = dt_vol
-    
-    # 1. 排液中のAlb喪失 (現在の濃度 * SC * 液量)
     current_alb_conc = current_alb_mass / epv * 100 # g/dL
     step_loss = (current_alb_conc * sc_albumin / 100) * dt_vol
-    
-    # 2. 補充によるAlb付加
     step_gain = (avg_repl_conc_g_dl / 100) * dt_vol
     
-    # 3. マスバランス更新
     current_alb_mass = current_alb_mass - step_loss + step_gain
     cum_loss += step_loss
     
-    # 病因物質 (補充なし, 単純Washout)
     current_pathogen *= np.exp(-dt_vol * sc_pathogen / epv)
     
     log_v.append(log_v[-1] + dt_vol)
@@ -177,20 +168,42 @@ for _ in range(steps):
 
 predicted_total_loss_real = cum_loss
 diff_alb = supplied_albumin_g - predicted_total_loss_real
-balance_percent = (supplied_albumin_g / predicted_total_loss_real - 1) * 100
+balance_percent_real = (supplied_albumin_g / predicted_total_loss_real - 1) * 100
 
 # --- 表示エリア ---
 st.title("選択的血漿交換 (SePE) シミュレーション")
 
-col1, col2, col3, col4, col5 = st.columns(5) # カラム数を増やしてレイアウト調整
+# 警告ロジック (Balance g)
+alert_msg = None
+alert_type = "none"
+if diff_alb < -20:
+    alert_type = "error"
+    alert_msg = f"⚠️ 警告: アルブミンが大幅に不足します ({int(diff_alb)}g)。目標設定を上げてください。"
+elif diff_alb > 30:
+    alert_type = "warning"
+    alert_msg = f"⚠️ 警告: アルブミンが過剰です (+{int(diff_alb)}g)。目標設定を下げてください。"
+
+# アラート表示
+if alert_msg:
+    if alert_type == "error":
+        st.error(alert_msg)
+    else:
+        st.warning(alert_msg)
+
+col1, col2, col3, col4, col5 = st.columns(5)
 
 col1.metric("予測循環血漿量 (EPV)", f"{int(epv)} mL", f"{bv_method}")
 col2.metric("治療時間", f"{int(treatment_time_min)} 分", f"QP: {qp} mL/min")
 col3.metric(f"必要処理量 ({target_removal}%除去)", f"{int(required_pv)} mL", f"{required_pv/epv:.2f} × EPV")
-
-# ご要望の配置: 左に予想喪失量、右に収支
 col4.metric("予想Alb喪失量", f"{predicted_total_loss_real:.1f} g", f"平均濃度: {predicted_total_loss_real/required_pv*100:.2f}%")
-col5.metric("アルブミン収支 (目標+5%)", f"{int(diff_alb):+d} g", f"補充:{int(supplied_albumin_g)}g (+{balance_percent:.1f}%)")
+
+# 収支表示の色分け
+balance_color = "normal"
+if diff_alb < -20 or diff_alb > 30:
+    balance_color = "off" # Streamlitの仕様上、文字色は変えにくいので差分表示で強調
+
+col5.metric(f"アルブミン収支 (目標{target_balance_ratio:+}%)", f"{int(diff_alb):+d} g", f"補充:{int(supplied_albumin_g)}g (+{balance_percent_real:.1f}%)", delta_color=balance_color)
+
 
 st.divider()
 
@@ -215,37 +228,36 @@ with c_img:
         st.info("※回路図画像 (circuit.png) がありません")
 
 with c_info:
-    st.subheader("📋 補充液作成プラン (安全設計モデル)")
+    st.subheader("📋 補充液作成プラン")
     
-    # 設計根拠の表示
-    st.success(f"""
-    **🛡️ 安全設計 (低Alb血症の防止):**
-    * **患者Alb値:** {alb_initial} g/dL (SC {sc_albumin})
-    * **基準喪失濃度:** **{est_loss_conc_percent:.2f}%** (初期値を維持するために必要な濃度)
-    * **目標補充濃度:** **{target_repl_conc_percent:.2f}%** (基準 + 5% の安全マージン)
+    # 設計根拠
+    st.info(f"""
+    **計算パラメータ:**
+    * **基準喪失濃度:** {est_loss_conc_percent:.2f}% (初期Alb {alb_initial} × SC {sc_albumin})
+    * **目標収支設定:** **{target_balance_ratio:+}%**
+    * **目標補充濃度:** **{target_repl_conc_percent:.2f}%**
     """)
     
     if count_a > 0:
         st.markdown(f"""
         #### 🅰️ セットA: {rec_a['name']} ({rec_a['vol']}mL) × **{count_a}回**
-        * **フィジオ140:** 500mLから **{rec_a['p_vol']}mL** を分取
+        * **細胞外液組成(フィジオ 140など):** 1袋(500mL)のうち **{rec_a['p_vol']}mL** を使用
         * **20%アルブミン:** **{rec_a['alb_btl']}本** ({rec_a['alb_btl']*50}mL) 添加
-        * <small>濃度: {rec_a['conc']:.2f}%</small>
         """)
         
     if count_b > 0:
         st.markdown(f"""
         #### 🅱️ セットB: {rec_b['name']} ({rec_b['vol']}mL) × **{count_b}回**
-        * **フィジオ140:** 500mLから **{rec_b['p_vol']}mL** を分取
+        * **細胞外液組成(フィジオ 140など):** 1袋(500mL)のうち **{rec_b['p_vol']}mL** を使用
         * **20%アルブミン:** **{rec_b['alb_btl']}本** ({rec_b['alb_btl']*50}mL) 添加
-        * <small>濃度: {rec_b['conc']:.2f}%</small>
         """)
         
     st.markdown("---")
     st.markdown(f"""
-    **合計:**
-    * **フィジオ:** {count_a + count_b} 袋 / **Alb:** {count_a*rec_a['alb_btl'] + count_b*rec_b['alb_btl']} 本
-    * **補充液平均濃度:** **{best_plan['repl_conc']:.2f}%**
+    **合計準備:**
+    * **細胞外液組成(500mL):** {count_a + count_b} 袋
+    * **20%アルブミン:** {count_a*rec_a['alb_btl'] + count_b*rec_b['alb_btl']} 本
+    * **総液量:** {actual_replacement_vol} mL
     """)
 
 st.divider()
@@ -277,12 +289,15 @@ color_2 = 'tab:blue'
 ax2.set_ylabel('【青】累積アルブミン喪失量 (g)', color=color_2, fontweight='bold', fontsize=12)
 line2 = ax2.plot(log_v, log_alb_loss_cum, color=color_2, linestyle='--', linewidth=2.5, label='予測アルブミン喪失量 (g)')
 ax2.tick_params(axis='y', labelcolor=color_2)
-# グラフの上限を、喪失量または補充量の大きい方に合わせる
 max_y2 = max(max(log_alb_loss_cum), supplied_albumin_g) * 1.2
 ax2.set_ylim(0, max_y2)
 
-# 補充量のラインを引く（参考）
+# 補充量のライン
 ax2.axhline(y=supplied_albumin_g, color='green', linestyle=':', alpha=0.7, label=f'総補充量 ({int(supplied_albumin_g)}g)')
+
+# 警告ライン (Loss + 30g)
+if diff_alb > 30:
+    ax2.text(0, predicted_total_loss_real + 30, '過剰警告ライン (+30g)', color='orange', fontsize=9, ha='left')
 
 lines = line1 + line2 + [ax2.get_lines()[-1]]
 labels = [l.get_label() for l in lines]
@@ -303,11 +318,9 @@ with st.expander("1. 用語解説 (QP, SC, RC)", expanded=True):
 
 with st.expander("2. 安全設計ロジック (危険回避)", expanded=True):
     st.markdown("""
-    **以前の計算との違い:**
-    * 旧ロジック: 「アルブミン濃度が下がる」ことを前提とした平均計算 → **過小評価のリスク**
-    * **新ロジック:** 「初期アルブミン濃度を維持する」ことを前提とした安全計算
+    **新・補充計画ロジック:**
+    $$ \text{目標補充濃度} = (\text{患者Alb値} \times SC) \times (1 + \text{設定バランス}\%) $$
     
-    **計算式:**
-    $$ \text{目標補充濃度} = (\text{患者Alb値} \times SC) \times 1.05 $$
-    これにより、治療初期の高濃度排液にも負けない十分な補充を行い、低アルブミン血症を確実に防ぎます。
+    * **バランス設定:** サイドバーのスライダーで **-10% ～ +15%** まで調整可能です。
+    * **警告機能:** アルブミン収支が **-20g未満** (不足) または **+30g超過** (過剰) の場合、警告アラートを表示します。
     """)
