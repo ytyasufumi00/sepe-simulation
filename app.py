@@ -3,9 +3,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import os
+from PIL import Image # 画像処理用
 
-# --- フォント設定 (システムインストール版) ---
-# packages.txt で入れた 'fonts-noto-cjk' を使用します
+# --- フォント設定 ---
+# packages.txt で入れた 'fonts-noto-cjk' を使用
 plt.rcParams['font.family'] = 'Noto Sans CJK JP'
 
 # --- メイン処理 ---
@@ -35,36 +36,32 @@ st.sidebar.markdown("<small>※in vivoでの目詰まりや安全域を考慮し
 sc_pathogen = st.sidebar.slider("病因物質SC", 0.0, 1.0, 0.90, 0.01)
 sc_albumin = st.sidebar.slider("アルブミンSC", 0.0, 1.0, 0.65, 0.01)
 
-# --- 計算 ---
+# --- 計算 (単位修正済み) ---
 if use_height_formula and height is not None:
-    # 小川の式 (Ogawa's Formula)
-    # BV(L) = 0.16874 * H(m) + 0.05986 * W(kg) - 0.0305
-    # ★修正点: cmをmに変換 (height / 100.0)
-    bv_L = 0.16874 * (height / 100.0) + 0.05986 * weight - 0.0305
+    # 小川の式: BV(L) = 0.16874 * H(m) + ...
+    # ★修正点: cmをmに変換 (/100) しています
+    h_m = height / 100.0
+    bv_L = 0.16874 * h_m + 0.05986 * weight - 0.0305
     bv_calc = bv_L * 1000 # L -> mL
     bv_method = "小川の式"
 else:
     bv_calc = weight * 70
     bv_method = "簡易式 (70mL/kg)"
 
-# 循環血漿量 (EPV)
 epv = bv_calc * (1 - hct / 100)
 
-# 必要処理量 (Required PV)
 if sc_pathogen > 0:
     required_pv = -np.log(1 - target_removal/100.0) * epv / sc_pathogen
 else:
     required_pv = 0
 
-# 治療時間など
 treatment_time_min = required_pv / qp if qp > 0 else 0
-vol_per_set = 50 + 140 # 190mL
+vol_per_set = 50 + 140
 num_sets = required_pv / vol_per_set
 num_sets_ceil = np.ceil(num_sets)
 actual_replacement_vol = num_sets_ceil * vol_per_set
-supplied_albumin_g = num_sets_ceil * 10 # 1セットあたり10g
+supplied_albumin_g = num_sets_ceil * 10
 
-# アルブミン予測喪失量
 total_alb_body_g = (epv / 100) * alb_initial
 alb_remaining_ratio = np.exp(-required_pv * sc_albumin / epv)
 predicted_alb_loss_g = total_alb_body_g * (1 - alb_remaining_ratio)
@@ -73,7 +70,7 @@ predicted_alb_loss_g = total_alb_body_g * (1 - alb_remaining_ratio)
 st.title("選択的血漿交換 (SePE) シミュレーション")
 
 col1, col2, col3, col4 = st.columns(4)
-col1.metric("予測循環血漿量 (EPV)", f"{int(epv)} mL", f"BV: {int(bv_calc)} mL ({bv_method})")
+col1.metric("予測循環血漿量 (EPV)", f"{int(epv)} mL", f"BV: {int(bv_calc)} mL")
 col2.metric("治療時間", f"{int(treatment_time_min)} 分", f"QP: {qp} mL/min")
 col3.metric("必要補充液セット数", f"{int(num_sets_ceil)} セット", f"総量: {int(actual_replacement_vol)} mL")
 col4.metric("予測喪失アルブミン", f"{predicted_alb_loss_g:.1f} g", f"補充: {int(supplied_albumin_g)} g")
@@ -82,30 +79,31 @@ st.divider()
 
 c_img, c_info = st.columns([1, 1])
 with c_img:
-    # 画像ファイルの存在確認と表示
-    img_files = ["circuit.png", "circuit.jpg", "circuit.jpeg", "Circuit.png"]
+    # 画像表示の安全装置
+    img_files = ["circuit.png", "circuit.jpg", "circuit.jpeg"]
     found_img = None
     for f in img_files:
         if os.path.exists(f):
             found_img = f
             break
-            
+    
     if found_img:
-        st.image(found_img, caption="SePE 回路構成図", use_container_width=True)
+        try:
+            # 画像が開けるかテストする
+            img = Image.open(found_img)
+            st.image(img, caption="SePE 回路構成図", use_container_width=True)
+        except Exception as e:
+            st.error("⚠️ 画像ファイルが壊れているため表示できません。再アップロードしてください。")
+            st.caption(f"エラー詳細: {e}")
     else:
-        st.warning("⚠️ 回路図画像が表示されません")
-        st.info("GitHubに 'circuit.png' または 'circuit.jpg' という名前で画像をアップロードしてください。")
+        st.info("※回路図画像 (circuit.png 等) が見つかりません")
 
 with c_info:
     st.info(f"""
-    **💉 補充液構成 (1セットあたり):**
-    * **20% アルブミン:** 50mL (Alb 10g)
-    * **フィジオ140:** 140mL
-    * **合計:** 190mL (Alb濃度 約5.3%)
-    
-    **📊 治療計画:**
-    * **目標除去率:** {target_removal}%
-    * **必要処理量:** {int(required_pv)} mL ({required_pv/epv:.2f} × EPV)
+    **補充液構成 (1セット):**
+    * 20%アルブミン (50mL)
+    * フィジオ140 (140mL)
+    * 合計 190mL (Alb濃度 約5.3%)
     """)
 
 st.divider()
@@ -125,7 +123,7 @@ ax1.grid(True, linestyle='--', alpha=0.5)
 ax1.set_ylim(0, 105)
 
 ax1.scatter([required_pv], [100 - target_removal], color='red', s=100, zorder=5)
-ax1.text(required_pv, 100 - target_removal + 5, f'目標達成\n{int(required_pv)}mL', color='red', ha='center', fontweight='bold',
+ax1.text(required_pv, 100 - target_removal + 10, f'目標達成\n{int(required_pv)}mL', color='red', ha='center', fontweight='bold',
          bbox=dict(facecolor='white', edgecolor='red', boxstyle='round,pad=0.5'))
 
 ax2 = ax1.twinx()
@@ -135,7 +133,6 @@ line2 = ax2.plot(v_process, alb_loss_curve, color=color_2, linestyle='--', linew
 ax2.tick_params(axis='y', labelcolor=color_2)
 ax2.set_ylim(0, max(alb_loss_curve)*1.3)
 
-# 凡例
 lines = line1 + line2
 labels = [l.get_label() for l in lines]
 ax1.legend(lines, labels, loc='center right', fontsize=10)
