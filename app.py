@@ -34,7 +34,7 @@ target_balance_ratio = st.sidebar.slider("収支目標 (対喪失量 %)", -10, 2
 # 4. 膜特性
 st.sidebar.subheader("膜特性 (Evacure EC-4A10c)")
 st.sidebar.info("💡 **設定のポイント:**\n初期値はカタログ値のアルブミンSC=0.6と設定していますが、実際の治療(in vivo)では、タンパク付着(ファウリング)によりSCはカタログ値SC=0.6より低下：予測値よりアルブミンを喪失しない可能性があります。病因物質SCの初期値は、エバキュアーEC-4AのIgGに対するカタログ値SC=0.4としています")
-sc_pathogen = st.sidebar.slider("病因物質SC", 0.0, 1.0, 0.90, 0.01)
+sc_pathogen = st.sidebar.slider("病因物質SC", 0.0, 1.0, 0.40, 0.01)
 sc_albumin = st.sidebar.slider("アルブミンSC", 0.0, 1.0, 0.60, 0.01)
 
 # --- 計算ロジック ---
@@ -325,5 +325,6 @@ with st.expander("3. 循環血漿量・必要処理量の計算根拠", expanded
     * アルブミンは補充液により濃度が維持される前提のため、処理量に比例して喪失します（線形モデル）。
       $$ \text{Loss} (g) = \text{排液中濃度} (g/dL) \times \text{処理量} (dL) $$
     """)
+
 
 
