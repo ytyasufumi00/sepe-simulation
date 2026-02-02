@@ -23,8 +23,8 @@ alb_initial = st.sidebar.number_input("血清アルブミン値 (g/dL)", value=3
 
 # 2. 治療目標
 st.sidebar.subheader("治療目標")
-# デフォルト値を70%に変更
-target_removal = st.sidebar.slider("病因物質の除去目標 (%)", 30, 95, 70, step=5)
+# デフォルト値を50%に変更
+target_removal = st.sidebar.slider("病因物質の除去目標 (%)", 30, 95, 50, step=5)
 qp = st.sidebar.number_input("血漿流量 QP (mL/min)", value=30.0, step=5.0)
 
 # 3. アルブミンバランス調整
@@ -325,6 +325,7 @@ with st.expander("3. 循環血漿量・必要処理量の計算根拠", expanded
     * アルブミンは補充液により濃度が維持される前提のため、処理量に比例して喪失します（線形モデル）。
       $$ \text{Loss} (g) = \text{排液中濃度} (g/dL) \times \text{処理量} (dL) $$
     """)
+
 
 
 
