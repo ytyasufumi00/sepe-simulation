@@ -28,7 +28,7 @@ qp = st.sidebar.number_input("血漿流量 QP (mL/min)", value=30.0, step=5.0)
 
 # 3. アルブミンバランス調整
 st.sidebar.subheader("アルブミン収支設定")
-target_balance_ratio = st.sidebar.slider("収支目標 (対喪失量 %)", -10, 15, 5, step=1, help="基準喪失量（初期濃度ベース）に対して、どれくらい増減させて補充するかを設定します。")
+target_balance_ratio = st.sidebar.slider("収支目標 (対喪失量 %)", -10, 15, 0, step=1, help="予測される喪失量（減衰曲線）に対して、どれくらい上乗せして補充するかを設定します。0%だと自然減衰相当、+10%付近で濃度維持レベルになります。")
 
 # 4. 膜特性
 st.sidebar.subheader("膜特性 (Evacure EC-4A10c)")
@@ -59,12 +59,15 @@ else:
 # C. 治療時間
 treatment_time_min = required_pv / qp if qp > 0 else 0
 
-# --- 💡 総量ベースの最適化ロジック (修正版) ---
+# --- 💡 総量ベースの最適化ロジック (修正版: 自然減衰ベース) ---
 
-# 1. 基準喪失量と目標補充量の計算
-# 安全設計: 初期濃度を維持するための喪失量見積もり (最大リスク)
-# Base Loss (g) = 処理量(dL) * 初期Alb(g/dL) * SC
-base_loss_g = (required_pv / 100.0) * alb_initial * sc_albumin
+# 1. 基準喪失量の計算 (減衰モデル)
+# 以前の「初期値維持(最大値)」ではなく、「自然減衰した場合の総喪失量」をベースにする
+total_alb_body_g = (epv / 100) * alb_initial
+# 減衰後の残存率
+alb_remaining_ratio_base = np.exp(-required_pv * sc_albumin / epv)
+# 予測される喪失量 (グラフの青線と同じ値)
+base_loss_g = total_alb_body_g * (1 - alb_remaining_ratio_base)
 
 # 目標補充量 (g) = 基準喪失量 * (1 + スライダー%)
 target_supply_g = base_loss_g * (1 + target_balance_ratio / 100.0)
@@ -86,7 +89,7 @@ recipe_patterns = [
 best_plan = None
 # 概算セット数 (容量500mLとして)
 approx_sets = int(np.ceil(required_pv / 500))
-# 探索範囲: 必要液量を満たす最小セット数 ～ +2セットくらいまで幅広く探す
+# 探索範囲
 search_sets_range = range(max(1, int(required_pv/600)), approx_sets + 3)
 
 found_plans = []
@@ -108,9 +111,8 @@ for n_total_sets in search_sets_range:
                 if total_vol < required_pv * 0.95:
                     continue
                 
-                # スコアリング: 「目標アルブミン量(g)」との差を最優先で最小化する
+                # スコアリング: 「目標アルブミン量(g)」との差を最優先
                 diff_g = abs(total_alb - target_supply_g)
-                # 液量の過剰分も少しペナルティにするが、アルブミン合わせを優先
                 vol_penalty = abs(total_vol - required_pv) / 200.0
                 
                 score = diff_g * 10 + vol_penalty
@@ -126,10 +128,9 @@ if found_plans:
     found_plans.sort(key=lambda x: x["score"])
     best_plan = found_plans[0]
 else:
-    # フォールバック
     best_plan = {"rec_a": recipe_patterns[1], "count_a": approx_sets, "rec_b": recipe_patterns[1], "count_b": 0, "total_vol": 500*approx_sets, "total_alb": 10*approx_sets, "score": 999}
 
-# 決定したレシピパラメータ
+# 決定したレシピ
 rec_a = best_plan["rec_a"]
 count_a = best_plan["count_a"]
 rec_b = best_plan["rec_b"]
@@ -138,24 +139,22 @@ actual_replacement_vol = best_plan["total_vol"]
 supplied_albumin_g = best_plan["total_alb"]
 
 # --- シミュレーション (実経過計算) ---
-# ※ここは予測モデルなので、実際のレシピ結果を使って再計算
 steps = 100
 dt_vol = required_pv / steps
 current_alb_mass = (epv / 100) * alb_initial
-current_pathogen = 100.0 # %
+current_pathogen = 100.0 
 
 log_v = [0]
 log_alb_loss_cum = [0]
 log_pathogen = [100.0]
 
 cum_loss = 0
-# 補充液の平均濃度
 avg_repl_conc_g_dl = supplied_albumin_g / actual_replacement_vol if actual_replacement_vol > 0 else 0
 
 for _ in range(steps):
     current_alb_conc = current_alb_mass / epv * 100 # g/dL
     step_loss = (current_alb_conc * sc_albumin / 100) * dt_vol
-    step_gain = (avg_repl_conc_g_dl / 100) * dt_vol # 平均濃度で補充と仮定
+    step_gain = (avg_repl_conc_g_dl / 100) * dt_vol 
     
     current_alb_mass = current_alb_mass - step_loss + step_gain
     cum_loss += step_loss
@@ -166,13 +165,11 @@ for _ in range(steps):
     log_alb_loss_cum.append(cum_loss)
     log_pathogen.append(current_pathogen)
 
-# 実シミュレーション上の喪失量
 predicted_total_loss_real = cum_loss
-# 最終的な収支
 final_diff_g = supplied_albumin_g - predicted_total_loss_real
 final_balance_percent = (supplied_albumin_g / predicted_total_loss_real - 1) * 100 if predicted_total_loss_real > 0 else 0
 
-# --- 警告判定 (ご指定の条件: <-20g or >+30g) ---
+# --- 警告判定 ---
 alert_msg = None
 alert_type = "none"
 if final_diff_g < -20:
@@ -198,7 +195,6 @@ col2.metric("治療時間", f"{int(treatment_time_min)} 分", f"QP: {qp} mL/min"
 col3.metric(f"必要処理量 ({target_removal}%除去)", f"{int(required_pv)} mL", f"{required_pv/epv:.2f} × EPV")
 col4.metric("予想Alb喪失量", f"{predicted_total_loss_real:.1f} g", f"平均濃度: {predicted_total_loss_real/required_pv*100:.2f}%")
 
-# 収支表示
 balance_color = "normal"
 if final_diff_g < -20 or final_diff_g > 30:
     balance_color = "off"
@@ -228,32 +224,31 @@ with c_img:
         st.info("※回路図画像 (circuit.png) がありません")
 
 with c_info:
-    st.subheader("📋 補充液作成プラン (最適化済み)")
+    st.subheader("📋 補充液作成プラン")
     
     st.info(f"""
-    **設計ターゲット:**
-    * **基準喪失量:** {base_loss_g:.1f}g (初期濃度維持に必要な量)
+    **設計基準:**
+    * **基準予測喪失量:** {base_loss_g:.1f}g (自然減衰モデル)
     * **目標補充量:** **{target_supply_g:.1f}g** (基準 × {100+target_balance_ratio}%)
-    * **実際の補充:** **{supplied_albumin_g}g** (プラン合計)
     """)
     
     if count_a > 0:
         st.markdown(f"""
         #### 🅰️ セットA: {rec_a['name']} ({rec_a['vol']}mL) × **{count_a}回**
-        * **細胞外液組成(フィジオ 140など):** 500mLのうち **{rec_a['p_vol']}mL** を使用
+        * **細胞外液組成(フィジオ 140など):** 1袋(500mL)のうち **{rec_a['p_vol']}mL** を使用
         * **20%アルブミン:** **{rec_a['alb_btl']}本** ({rec_a['alb_btl']*50}mL) 添加
         """)
         
     if count_b > 0:
         st.markdown(f"""
         #### 🅱️ セットB: {rec_b['name']} ({rec_b['vol']}mL) × **{count_b}回**
-        * **細胞外液組成(フィジオ 140など):** 500mLのうち **{rec_b['p_vol']}mL** を使用
+        * **細胞外液組成(フィジオ 140など):** 1袋(500mL)のうち **{rec_b['p_vol']}mL** を使用
         * **20%アルブミン:** **{rec_b['alb_btl']}本** ({rec_b['alb_btl']*50}mL) 添加
         """)
         
     st.markdown("---")
     st.markdown(f"""
-    **合計準備数:**
+    **合計準備:**
     * **細胞外液組成(500mL):** {count_a + count_b} 袋
     * **20%アルブミン:** {count_a*rec_a['alb_btl'] + count_b*rec_b['alb_btl']} 本
     * **総液量:** {actual_replacement_vol} mL
@@ -291,7 +286,6 @@ ax2.tick_params(axis='y', labelcolor=color_2)
 max_y2 = max(max(log_alb_loss_cum), supplied_albumin_g) * 1.2
 ax2.set_ylim(0, max_y2)
 
-# 補充量のライン
 ax2.axhline(y=supplied_albumin_g, color='green', linestyle=':', alpha=0.7, label=f'総補充量 ({int(supplied_albumin_g)}g)')
 
 # 警告ライン
@@ -321,8 +315,10 @@ with st.expander("2. 補液設計と警告基準", expanded=True):
     st.markdown("""
     **補液設計:**
     スライダーで設定された「収支目標」に基づき、最適なセットの組み合わせ（Aセット・Bセット）を自動計算します。
+    * **0%設定:** 自然減衰で失われる量と同量を補充します（体内濃度はやや低下傾向）。
+    * **+10%以上:** 濃度維持を目指して多めに補充します。
     
     **警告基準:**
-    * **不足警告:** 最終的なアルブミン収支が **-20g** を下回る場合（低Alb血症リスク）。
-    * **過剰警告:** 最終的なアルブミン収支が **+30g** を上回る場合（溢水・経済性）。
+    * **不足警告:** 最終的なアルブミン収支が **-20g未満** (不足)。
+    * **過剰警告:** 最終的なアルブミン収支が **+30g超過** (過剰)。
     """)
