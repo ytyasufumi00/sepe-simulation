@@ -28,7 +28,7 @@ qp = st.sidebar.number_input("血漿流量 QP (mL/min)", value=30.0, step=5.0)
 
 # 3. アルブミンバランス調整
 st.sidebar.subheader("アルブミン収支設定")
-target_balance_ratio = st.sidebar.slider("収支目標 (対喪失量 %)", -10, 15, 0, step=1, help="予測される喪失量（減衰曲線）に対して、どれくらい上乗せして補充するかを設定します。0%だと自然減衰相当、+10%付近で濃度維持レベルになります。")
+target_balance_ratio = st.sidebar.slider("収支目標 (対喪失量 %)", -10, 20, 0, step=1, help="基準予測喪失量に対して、何％上乗せして補充するか設定します。")
 
 # 4. 膜特性
 st.sidebar.subheader("膜特性 (Evacure EC-4A10c)")
@@ -59,84 +59,122 @@ else:
 # C. 治療時間
 treatment_time_min = required_pv / qp if qp > 0 else 0
 
-# --- 💡 総量ベースの最適化ロジック (修正版: 自然減衰ベース) ---
+# --- 💡 グラム数優先・液量調整ロジック ---
 
-# 1. 基準喪失量の計算 (減衰モデル)
-# 以前の「初期値維持(最大値)」ではなく、「自然減衰した場合の総喪失量」をベースにする
+# 1. 目標の設定
+# 基準喪失量 (自然減衰モデル)
 total_alb_body_g = (epv / 100) * alb_initial
-# 減衰後の残存率
 alb_remaining_ratio_base = np.exp(-required_pv * sc_albumin / epv)
-# 予測される喪失量 (グラフの青線と同じ値)
 base_loss_g = total_alb_body_g * (1 - alb_remaining_ratio_base)
 
-# 目標補充量 (g) = 基準喪失量 * (1 + スライダー%)
+# 目標補充量 (g)
 target_supply_g = base_loss_g * (1 + target_balance_ratio / 100.0)
 
-# 2. 使用可能な「セットの型」を定義
-recipe_patterns = [
-    # 濃度低め (Alb 1本=10g)
-    {"name": "Light",   "p_vol": 500, "alb_btl": 1, "vol": 550, "alb_g": 10, "conc": 1.81},
-    {"name": "Std-1",   "p_vol": 450, "alb_btl": 1, "vol": 500, "alb_g": 10, "conc": 2.00},
-    {"name": "Std-2",   "p_vol": 400, "alb_btl": 1, "vol": 450, "alb_g": 10, "conc": 2.22},
-    {"name": "Conc-1",  "p_vol": 350, "alb_btl": 1, "vol": 400, "alb_g": 10, "conc": 2.50},
-    # 濃度高め (Alb 2本=20g)
-    {"name": "Double-1", "p_vol": 450, "alb_btl": 2, "vol": 550, "alb_g": 20, "conc": 3.63},
-    {"name": "Double-2", "p_vol": 400, "alb_btl": 2, "vol": 500, "alb_g": 20, "conc": 4.00},
-    {"name": "Double-3", "p_vol": 300, "alb_btl": 2, "vol": 400, "alb_g": 20, "conc": 5.00},
-]
+# 2. 探索用部品の定義 (看護師が調整しやすい量限定)
+# フィジオ量は 50mL 刻み (300mL ~ 500mL)
+physio_options = [500, 450, 400, 350, 300]
 
-# 3. 最適な組み合わせの探索
+# セットの種類 (Alb 1本 or 2本)
+bottle_options = [1, 2]
+
 best_plan = None
-# 概算セット数 (容量500mLとして)
-approx_sets = int(np.ceil(required_pv / 500))
-# 探索範囲
-search_sets_range = range(max(1, int(required_pv/600)), approx_sets + 3)
+best_score = float('inf')
+
+# 3. 探索実行
+# 戦略: 
+# Step 1: 目標グラム数に最も近い「総ボトル数 (10g単位)」を決める
+# Step 2: そのボトル数を実現するセット数と内訳を決める
+# Step 3: 液量が目標(required_pv)に近づくようフィジオ量を調整する
+
+# 目標ボトル数 (四捨五入)
+target_bottles = max(1, round(target_supply_g / 10))
+# 探索範囲: 目標ボトル数 ±1本
+bottle_search_range = range(max(1, target_bottles - 1), target_bottles + 2)
 
 found_plans = []
 
-for n_total_sets in search_sets_range:
-    for i in range(len(recipe_patterns)):
-        for j in range(i, len(recipe_patterns)):
-            rec_a = recipe_patterns[i]
-            rec_b = recipe_patterns[j]
+for total_bottles in bottle_search_range:
+    current_supply_g = total_bottles * 10
+    
+    # このボトル数を実現するための「セット数」を考える
+    # セット数は 1セットあたり1本～2本なので、 total_bottles ～ ceil(total_bottles/2) の範囲
+    min_sets = int(np.ceil(total_bottles / 2))
+    max_sets = total_bottles
+    
+    for n_sets in range(min_sets, max_sets + 1):
+        # 2本入りセットの数 (鶴亀算)
+        # x + y = n_sets
+        # 1x + 2y = total_bottles
+        # -> y = total_bottles - n_sets
+        n_double = total_bottles - n_sets
+        n_single = n_sets - n_double
+        
+        if n_double < 0 or n_single < 0:
+            continue
             
-            for k in range(n_total_sets + 1):
-                count_a = k
-                count_b = n_total_sets - k
+        # 液量の最適化
+        # 各セットのフィジオ量を調整して、Total Volume を Required PV に近づける
+        # 使えるフィジオ量: physio_options (500, 450, 400, 350, 300)
+        
+        # 全組み合わせは重いので、代表的な組み合わせを探索
+        for p_vol_single in physio_options:
+            for p_vol_double in physio_options:
                 
-                total_vol = (rec_a["vol"] * count_a) + (rec_b["vol"] * count_b)
-                total_alb = (rec_a["alb_g"] * count_a) + (rec_b["alb_g"] * count_b)
+                vol_single = p_vol_single + 50 # Alb 50mL
+                vol_double = p_vol_double + 100 # Alb 100mL (2本)
                 
-                # 制約1: 液量 (必要量の95%以上確保)
-                if total_vol < required_pv * 0.95:
+                total_vol = (vol_single * n_single) + (vol_double * n_double)
+                
+                # 液量チェック
+                # 許容範囲: 必要量の 90% ～ 120% (少し多めは許容、少なすぎはNG)
+                if total_vol < required_pv * 0.90:
                     continue
                 
-                # スコアリング: 「目標アルブミン量(g)」との差を最優先
-                diff_g = abs(total_alb - target_supply_g)
-                vol_penalty = abs(total_vol - required_pv) / 200.0
+                # スコア計算 (低いほど良い)
+                # 1. グラム数誤差 (最重要) -> Step 1でループしてるので自然に考慮されるが念のため
+                score_g = abs(current_supply_g - target_supply_g) * 100
                 
-                score = diff_g * 10 + vol_penalty
+                # 2. 液量誤差
+                score_vol = abs(total_vol - required_pv) / 10
+                
+                # 3. 複雑さペナルティ (種類の混在や、変な液量は避ける)
+                score_complex = 0
+                if n_single > 0 and n_double > 0: score_complex += 20 # 混在
+                if p_vol_single != 500: score_complex += 10 # 全量以外は手間
+                if p_vol_double != 500: score_complex += 10
+                
+                final_score = score_g + score_vol + score_complex
                 
                 found_plans.append({
-                    "rec_a": rec_a, "count_a": count_a,
-                    "rec_b": rec_b, "count_b": count_b,
-                    "total_vol": total_vol, "total_alb": total_alb,
-                    "score": score
+                    "n_single": n_single, "p_single": p_vol_single,
+                    "n_double": n_double, "p_double": p_vol_double,
+                    "total_g": current_supply_g,
+                    "total_vol": total_vol,
+                    "score": final_score
                 })
 
+# ベストプランの選択
 if found_plans:
     found_plans.sort(key=lambda x: x["score"])
     best_plan = found_plans[0]
 else:
-    best_plan = {"rec_a": recipe_patterns[1], "count_a": approx_sets, "rec_b": recipe_patterns[1], "count_b": 0, "total_vol": 500*approx_sets, "total_alb": 10*approx_sets, "score": 999}
+    # 万が一見つからない場合のフォールバック (標準的構成)
+    sets = int(np.ceil(required_pv / 550))
+    best_plan = {
+        "n_single": sets, "p_single": 500,
+        "n_double": 0, "p_double": 500,
+        "total_g": sets*10, "total_vol": sets*550,
+        "score": 999
+    }
 
-# 決定したレシピ
-rec_a = best_plan["rec_a"]
-count_a = best_plan["count_a"]
-rec_b = best_plan["rec_b"]
-count_b = best_plan["count_b"]
+# データ展開
+n_a = best_plan["n_single"] # 1本タイプ
+p_a = best_plan["p_single"]
+n_b = best_plan["n_double"] # 2本タイプ
+p_b = best_plan["p_double"]
+
 actual_replacement_vol = best_plan["total_vol"]
-supplied_albumin_g = best_plan["total_alb"]
+supplied_albumin_g = best_plan["total_g"]
 
 # --- シミュレーション (実経過計算) ---
 steps = 100
@@ -193,13 +231,13 @@ col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("予測循環血漿量 (EPV)", f"{int(epv)} mL", f"{bv_method}")
 col2.metric("治療時間", f"{int(treatment_time_min)} 分", f"QP: {qp} mL/min")
 col3.metric(f"必要処理量 ({target_removal}%除去)", f"{int(required_pv)} mL", f"{required_pv/epv:.2f} × EPV")
-col4.metric("予想Alb喪失量", f"{predicted_total_loss_real:.1f} g", f"平均濃度: {predicted_total_loss_real/required_pv*100:.2f}%")
+col4.metric("予想Alb喪失量", f"{predicted_total_loss_real:.1f} g", f"基準(0%): {base_loss_g:.1f}g")
 
 balance_color = "normal"
 if final_diff_g < -20 or final_diff_g > 30:
     balance_color = "off"
 
-col5.metric(f"アルブミン収支", f"{int(final_diff_g):+d} g", f"設定目標:{target_balance_ratio:+}% → 結果:{final_balance_percent:+.1f}%", delta_color=balance_color)
+col5.metric(f"アルブミン収支", f"{int(final_diff_g):+d} g", f"目標:{target_supply_g:.1f}g → 採用:{int(supplied_albumin_g)}g", delta_color=balance_color)
 
 st.divider()
 
@@ -226,32 +264,32 @@ with c_img:
 with c_info:
     st.subheader("📋 補充液作成プラン")
     
-    st.info(f"""
-    **設計基準:**
-    * **基準予測喪失量:** {base_loss_g:.1f}g (自然減衰モデル)
-    * **目標補充量:** **{target_supply_g:.1f}g** (基準 × {100+target_balance_ratio}%)
-    """)
+    st.success(f"**目標アルブミン量 {target_supply_g:.1f}g に最も近いプラン（{supplied_albumin_g}g）を提案します**")
     
-    if count_a > 0:
+    # 1本タイプ (Type A)
+    if n_a > 0:
+        vol_a = p_a + 50
         st.markdown(f"""
-        #### 🅰️ セットA: {rec_a['name']} ({rec_a['vol']}mL) × **{count_a}回**
-        * **細胞外液組成(フィジオ 140など):** 1袋(500mL)のうち **{rec_a['p_vol']}mL** を使用
-        * **20%アルブミン:** **{rec_a['alb_btl']}本** ({rec_a['alb_btl']*50}mL) 添加
+        #### 🅰️ 基本セット: {vol_a}mL × **{n_a}回**
+        * **細胞外液組成:** 500mLバッグのうち **{p_a}mL** を使用
+        * **20%アルブミン:** **1本** (10g/50mL) を添加
         """)
-        
-    if count_b > 0:
+
+    # 2本タイプ (Type B)
+    if n_b > 0:
+        vol_b = p_b + 100
         st.markdown(f"""
-        #### 🅱️ セットB: {rec_b['name']} ({rec_b['vol']}mL) × **{count_b}回**
-        * **細胞外液組成(フィジオ 140など):** 1袋(500mL)のうち **{rec_b['p_vol']}mL** を使用
-        * **20%アルブミン:** **{rec_b['alb_btl']}本** ({rec_b['alb_btl']*50}mL) 添加
+        #### 🅱️ 濃厚セット: {vol_b}mL × **{n_b}回**
+        * **細胞外液組成:** 500mLバッグのうち **{p_b}mL** を使用
+        * **20%アルブミン:** **2本** (20g/100mL) を添加
         """)
         
     st.markdown("---")
     st.markdown(f"""
     **合計準備:**
-    * **細胞外液組成(500mL):** {count_a + count_b} 袋
-    * **20%アルブミン:** {count_a*rec_a['alb_btl'] + count_b*rec_b['alb_btl']} 本
-    * **総液量:** {actual_replacement_vol} mL
+    * **細胞外液組成(500mL):** {n_a + n_b} 袋
+    * **20%アルブミン:** {n_a*1 + n_b*2} 本
+    * **総液量:** {actual_replacement_vol} mL (必要量比 {actual_replacement_vol/required_pv*100:.0f}%)
     """)
 
 st.divider()
@@ -311,14 +349,11 @@ with st.expander("1. 用語解説 (QP, SC, RC)", expanded=True):
     * **阻止率 (RC):** 膜による阻止性能 ($RC = 1 - SC$)。
     """)
 
-with st.expander("2. 補液設計と警告基準", expanded=True):
+with st.expander("2. 補液最適化ロジック", expanded=True):
     st.markdown("""
-    **補液設計:**
-    スライダーで設定された「収支目標」に基づき、最適なセットの組み合わせ（Aセット・Bセット）を自動計算します。
-    * **0%設定:** 自然減衰で失われる量と同量を補充します（体内濃度はやや低下傾向）。
-    * **+10%以上:** 濃度維持を目指して多めに補充します。
-    
-    **警告基準:**
-    * **不足警告:** 最終的なアルブミン収支が **-20g未満** (不足)。
-    * **過剰警告:** 最終的なアルブミン収支が **+30g超過** (過剰)。
+    **アルブミン本数優先:**
+    1.  まず、目標とする総アルブミン量（g）に最も近くなる「ボトル本数（1本10g単位）」を決定します。
+        * *例: 目標45.7g → 5本(50g)を採用*
+    2.  決定した本数を使って、必要液量に最も近づく「細胞外液の量」を50mL刻み（300～500mL）で調整します。
+        * *例: 5セットで3000mL必要 → 1セットあたり600mL (フィジオ550+Alb50) は作れないので、フィジオ500+Alb50(550mL) x 5回 + 不足分調整...といった計算を行います。*
     """)
