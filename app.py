@@ -23,7 +23,8 @@ alb_initial = st.sidebar.number_input("血清アルブミン値 (g/dL)", value=4
 
 # 2. 治療目標
 st.sidebar.subheader("治療目標")
-target_removal = st.sidebar.slider("病因物質の除去目標 (%)", 30, 95, 60, step=5)
+# デフォルト値を70%に変更
+target_removal = st.sidebar.slider("病因物質の除去目標 (%)", 30, 95, 70, step=5)
 qp = st.sidebar.number_input("血漿流量 QP (mL/min)", value=30.0, step=5.0)
 
 # 3. アルブミンバランス調整
@@ -59,10 +60,9 @@ else:
 # C. 治療時間
 treatment_time_min = required_pv / qp if qp > 0 else 0
 
-# --- 💡 喪失量計算 (修正版: 線形モデル) ---
+# --- 💡 喪失量計算 (線形モデル) ---
 
 # 1. アルブミン喪失量の計算
-# 前提: 補充により血清Alb濃度は維持されるため、一定の濃度で排液され続ける
 # 排液中濃度(g/dL) = 血清Alb × SC
 filtrate_alb_conc = alb_initial * sc_albumin
 
@@ -108,18 +108,15 @@ for n_total_sets in search_range:
                 total_alb = (rec_a["alb_g"] * count_a) + (rec_b["alb_g"] * count_b)
                 
                 # スコア計算
-                # アルブミン量の誤差を最優先
                 diff_g = abs(total_alb - target_supply_g)
                 score_g = (diff_g ** 2) * 50
                 
-                # 液量の誤差 (±15%程度は許容)
                 diff_vol = abs(total_vol - required_pv)
                 if 0.85 * required_pv <= total_vol <= 1.25 * required_pv:
                      score_vol = diff_vol / 10
                 else:
                      score_vol = diff_vol * 10 
                 
-                # 複雑性ペナルティ
                 score_complex = 0
                 if count_a > 0 and count_b > 0: score_complex += 50
                 if rec_a["p_vol"] != 500: score_complex += 5
@@ -150,24 +147,16 @@ actual_replacement_vol = best_plan["total_vol"]
 supplied_albumin_g = best_plan["total_g"]
 
 # --- 指標計算 ---
-# 補充液の平均濃度
 repl_alb_conc = supplied_albumin_g / actual_replacement_vol * 100 if actual_replacement_vol > 0 else 0
-
-# 実際の収支
 final_diff_g = supplied_albumin_g - base_loss_g
+avg_loss_conc = base_loss_g / required_pv * 100 if required_pv > 0 else 0
 
-# --- シミュレーション (グラフ用データ生成) ---
+# --- シミュレーション (グラフ用) ---
 steps = 100
 dt_vol = required_pv / steps
-
 log_v = np.linspace(0, required_pv * 1.2, steps)
-
-# 病因物質: 補充されないため減衰する (Washout)
-# C = C0 * exp(-V*SC/EPV)
 log_pathogen = 100 * np.exp(-log_v * sc_pathogen / epv)
-
-# アルブミン喪失: 濃度維持前提のため、単純比例で増加 (Linear)
-# Loss = V * (Alb * SC)
+# 喪失量線形増加
 log_alb_loss_cum = (log_v / 100.0) * filtrate_alb_conc
 
 # --- 警告判定 ---
@@ -209,11 +198,11 @@ with c_bal:
         balance_color = "off"
     st.metric(f"収支結果", f"{int(final_diff_g):+d} g", f"目標:{target_supply_g:.1f}g → 採用:{int(supplied_albumin_g)}g", delta_color=balance_color)
     
-    st.info(f"""
-    **計算のポイント:**
-    アルブミン補充により血中濃度は維持される前提のため、喪失量は単純比例で計算されます。
-    * **計算式:** {filtrate_alb_conc:.2f} g/dL × {int(required_pv)/100:.1f} dL
-    * **予測喪失量:** **{base_loss_g:.1f} g**
+    # 計算のポイント(水色枠)を削除し、シンプルに収支情報のみ表示
+    st.markdown(f"""
+    * **補充:** {supplied_albumin_g} g
+    * **喪失:** {base_loss_g:.1f} g
+    * **設定目標:** {target_balance_ratio:+}%
     """)
 
 with c_plan:
@@ -224,12 +213,13 @@ with c_plan:
         p_vol = rec['p_vol']
         btl = rec['alb_btl']
         
+        # 20%アルブミン 50ml という表記に変更
         alb_text = f"**{btl}本** ({btl*10}g)" if btl > 0 else "なし"
         
         st.markdown(f"""
         #### {label}: {vol}mL × **{count}回**
         * **細胞外液:** 500mLバッグのうち **{p_vol}mL** を使用
-        * **20%アルブミン:** {alb_text} 添加
+        * **20%アルブミン 50ml:** {alb_text} 添加
         """)
 
     if count_a > 0:
@@ -239,15 +229,22 @@ with c_plan:
     if count_b > 0:
         display_plan(rec_b, count_b, "🅱️ パターンB")
         
-    st.caption(f"合計: 細胞外液 {count_a+count_b}袋 / Alb {count_a*rec_a['alb_btl'] + count_b*rec_b['alb_btl']}本 / 総液量 {actual_replacement_vol}mL")
+    # 合計を薄い表記(caption)ではなく、見やすい太字に変更
+    st.markdown("---")
+    st.markdown(f"""
+    ### 合計準備数
+    * **細胞外液 (500mL):** **{count_a+count_b}** 袋
+    * **20%アルブミン 50ml:** **{count_a*rec_a['alb_btl'] + count_b*rec_b['alb_btl']}** 本
+    * **総液量:** **{actual_replacement_vol}** mL
+    """)
 
 st.divider()
 
-# --- 画像 ---
+# --- 画像 (最初から表示) ---
 if os.path.exists("circuit.png") or os.path.exists("circuit.jpg"):
-    with st.expander("回路構成図を見る"):
-        img_path = "circuit.png" if os.path.exists("circuit.png") else "circuit.jpg"
-        st.image(img_path, caption="SePE 回路構成図")
+    st.subheader("SePE 回路構成図")
+    img_path = "circuit.png" if os.path.exists("circuit.png") else "circuit.jpg"
+    st.image(img_path)
 
 # --- グラフ描画 ---
 st.subheader(f"治療経過シミュレーション")
@@ -273,7 +270,6 @@ ax1.annotate(f'目標達成\n{int(required_pv)}mL処理\n(残存{100-target_remo
 ax2 = ax1.twinx()
 color_2 = 'tab:blue'
 ax2.set_ylabel('【青】累積アルブミン喪失量 (g)', color=color_2, fontweight='bold', fontsize=12)
-# 修正: 直線グラフを描画
 line2 = ax2.plot(log_v, log_alb_loss_cum, color=color_2, linestyle='--', linewidth=2.5, label='予測アルブミン喪失量 (g)')
 ax2.tick_params(axis='y', labelcolor=color_2)
 max_y2 = max(max(log_alb_loss_cum), supplied_albumin_g) * 1.2
