@@ -17,9 +17,9 @@ st.sidebar.header("患者・治療パラメータ設定")
 # 1. 患者情報
 st.sidebar.subheader("患者情報")
 height = st.sidebar.number_input("身長 (cm) ※任意", value=0.0, step=0.1, help="入力なし(0.0)の場合は簡易式(70mL/kg)が適用されます。")
-weight = st.sidebar.number_input("体重 (kg)", value=65.0, step=0.1)
+weight = st.sidebar.number_input("体重 (kg)", value=50.0, step=0.1)
 hct = st.sidebar.number_input("血中ヘマトクリット値 (%)", value=30.0, step=0.1)
-alb_initial = st.sidebar.number_input("血清アルブミン値 (g/dL)", value=4.0, step=0.1)
+alb_initial = st.sidebar.number_input("血清アルブミン値 (g/dL)", value=3.5, step=0.1)
 
 # 2. 治療目標
 st.sidebar.subheader("治療目標")
@@ -325,6 +325,7 @@ with st.expander("3. 循環血漿量・必要処理量の計算根拠", expanded
     * アルブミンは補充液により濃度が維持される前提のため、処理量に比例して喪失します（線形モデル）。
       $$ \text{Loss} (g) = \text{排液中濃度} (g/dL) \times \text{処理量} (dL) $$
     """)
+
 
 
 
