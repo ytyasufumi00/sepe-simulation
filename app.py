@@ -9,7 +9,7 @@ from PIL import Image
 plt.rcParams['font.family'] = 'Noto Sans CJK JP'
 
 # --- メイン処理 ---
-st.set_page_config(page_title="SePE Simulation (EC-4A10c)", layout="wide")
+st.set_page_config(page_title="SePE Simulation - 信州上田医療センター 腎臓内科ver.", layout="wide")
 
 # --- サイドバー ---
 st.sidebar.header("患者・治療パラメータ設定")
@@ -171,6 +171,7 @@ elif final_diff_g > 30:
 
 # --- 表示エリア ---
 st.title("選択的血漿交換 (SePE) シミュレーション")
+st.markdown("#### 信州上田医療センター 腎臓内科ver.")
 
 if alert_msg:
     if alert_type == "error":
@@ -198,7 +199,6 @@ with c_bal:
         balance_color = "off"
     st.metric(f"収支結果", f"{int(final_diff_g):+d} g", f"目標:{target_supply_g:.1f}g → 採用:{int(supplied_albumin_g)}g", delta_color=balance_color)
     
-    # 計算のポイント(水色枠)を削除し、シンプルに収支情報のみ表示
     st.markdown(f"""
     * **補充:** {supplied_albumin_g} g
     * **喪失:** {base_loss_g:.1f} g
@@ -213,7 +213,6 @@ with c_plan:
         p_vol = rec['p_vol']
         btl = rec['alb_btl']
         
-        # 20%アルブミン 50ml という表記に変更
         alb_text = f"**{btl}本** ({btl*10}g)" if btl > 0 else "なし"
         
         st.markdown(f"""
@@ -229,7 +228,6 @@ with c_plan:
     if count_b > 0:
         display_plan(rec_b, count_b, "🅱️ パターンB")
         
-    # 合計を薄い表記(caption)ではなく、見やすい太字に変更
     st.markdown("---")
     st.markdown(f"""
     ### 合計準備数
