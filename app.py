@@ -16,8 +16,6 @@ st.sidebar.header("患者・治療パラメータ設定")
 
 # 1. 患者情報
 st.sidebar.subheader("患者情報")
-
-# 身長: デフォルトを0.0にし、未入力(0)の場合は簡易式を使うロジックへ
 height = st.sidebar.number_input("身長 (cm) ※任意", value=0.0, step=0.1, help="入力なし(0.0)の場合は簡易式(70mL/kg)が適用されます。")
 weight = st.sidebar.number_input("体重 (kg)", value=65.0, step=0.1)
 hct = st.sidebar.number_input("血中ヘマトクリット値 (%)", value=30.0, step=0.1)
@@ -36,68 +34,150 @@ sc_albumin = st.sidebar.slider("アルブミンSC", 0.0, 1.0, 0.65, 0.01)
 
 # --- 計算ロジック ---
 
-# A. 循環血液量 (BV) の計算分岐
+# A. 循環血液量 (BV)
 if height > 0:
-    # 小川の式 (m換算)
     h_m = height / 100.0
     bv_L = 0.16874 * h_m + 0.05986 * weight - 0.0305
-    bv_calc = bv_L * 1000 # L -> mL
+    bv_calc = bv_L * 1000
     bv_method = "小川の式 (日本人成人)"
 else:
-    # 簡易式
     bv_calc = weight * 70
     bv_method = "簡易式 (70mL/kg)"
 
-# B. 循環血漿量 (EPV)
 epv = bv_calc * (1 - hct / 100)
 
-# C. 必要処理量 (Required PV)
+# B. 必要処理量
 if sc_pathogen > 0:
     required_pv = -np.log(1 - target_removal/100.0) * epv / sc_pathogen
 else:
     required_pv = 0
 
-# D. 治療時間・補充液
+# C. 治療時間
 treatment_time_min = required_pv / qp if qp > 0 else 0
-vol_per_set = 50 + 140 # 190mL (20%Alb 50mL + Physio 140mL)
-num_sets = required_pv / vol_per_set
-num_sets_ceil = np.ceil(num_sets)
-actual_replacement_vol = num_sets_ceil * vol_per_set
-supplied_albumin_g = num_sets_ceil * 10 # 1セットあたり10g
 
-# E. アルブミン予測喪失量 (Washoutモデル)
+# D. アルブミン喪失予測
 total_alb_body_g = (epv / 100) * alb_initial
 alb_remaining_ratio = np.exp(-required_pv * sc_albumin / epv)
 predicted_alb_loss_g = total_alb_body_g * (1 - alb_remaining_ratio)
 
-# F. 分析用データ
-# 補充液のAlb濃度
-repl_alb_conc = (10 / 190) * 100 # g/dL (約5.26%)
-# 排液(濾液)の平均Alb濃度 (初期値ベースの概算)
-filtrate_alb_conc = alb_initial * sc_albumin # g/dL
+# --- 💡 高度なレシピ設計ロジック ---
+
+# 1. 目標の設定
+# 喪失する液体の平均濃度 = 喪失Alb総量 / 処理量PV
+if required_pv > 0:
+    avg_loss_conc = predicted_alb_loss_g / required_pv * 100 # %
+else:
+    avg_loss_conc = 0
+
+# 目標補充濃度 (喪失濃度 + 15% の安全マージン)
+target_conc = avg_loss_conc * 1.15
+target_alb_g = predicted_alb_loss_g * 1.15
+
+# 2. 使用可能な「セットの型」を定義
+# (名前, フィジオ量mL, Alb本数, 総容量mL, Alb量g, 濃度%)
+# フィジオは500mLバッグから抜き取る前提 (残液: 500 - Physio量)
+recipe_patterns = [
+    # 濃度低め (Alb 1本)
+    {"name": "Light",   "p_vol": 500, "alb_btl": 1, "vol": 550, "alb_g": 10, "conc": 1.81},
+    {"name": "Std-1",   "p_vol": 450, "alb_btl": 1, "vol": 500, "alb_g": 10, "conc": 2.00},
+    {"name": "Std-2",   "p_vol": 400, "alb_btl": 1, "vol": 450, "alb_g": 10, "conc": 2.22},
+    {"name": "Conc-1",  "p_vol": 350, "alb_btl": 1, "vol": 400, "alb_g": 10, "conc": 2.50},
+    # 濃度高め (Alb 2本 = 100mL)
+    {"name": "Double-1", "p_vol": 450, "alb_btl": 2, "vol": 550, "alb_g": 20, "conc": 3.63},
+    {"name": "Double-2", "p_vol": 400, "alb_btl": 2, "vol": 500, "alb_g": 20, "conc": 4.00},
+    {"name": "Double-3", "p_vol": 300, "alb_btl": 2, "vol": 400, "alb_g": 20, "conc": 5.00},
+]
+
+# 3. 最適な組み合わせの探索
+best_plan = None
+min_error = float('inf')
+
+# 必要なセット数の概算 (平均500mLとして)
+approx_sets = int(np.ceil(required_pv / 500))
+# 探索範囲: 概算セット数 ±1
+search_sets_range = range(max(1, approx_sets), approx_sets + 2)
+
+found_plans = []
+
+# パターンAとパターンBを組み合わせる総当たり探索
+for n_total_sets in search_sets_range:
+    for i in range(len(recipe_patterns)):
+        for j in range(i, len(recipe_patterns)): # 同じか、それ以降のパターン (重複組み合わせ)
+            rec_a = recipe_patterns[i]
+            rec_b = recipe_patterns[j]
+            
+            # Aを k 個、 Bを (n_total_sets - k) 個 使う
+            for k in range(n_total_sets + 1):
+                count_a = k
+                count_b = n_total_sets - k
+                
+                total_vol = (rec_a["vol"] * count_a) + (rec_b["vol"] * count_b)
+                total_alb = (rec_a["alb_g"] * count_a) + (rec_b["alb_g"] * count_b)
+                
+                # 制約1: 容量が足りているか？ (95%以上)
+                if total_vol < required_pv * 0.95:
+                    continue
+                    
+                # 制約2: アルブミンバランス (喪失量 + 0% ～ +30% の範囲)
+                # ユーザー希望は+15%前後だが、組み合わせによってはピッタリいかないので幅を持たせる
+                if predicted_alb_loss_g > 0:
+                    balance_pct = (total_alb / predicted_alb_loss_g - 1) * 100
+                else:
+                    balance_pct = 0
+                
+                if 0 <= balance_pct <= 30:
+                    # 評価スコア: +15%からの乖離 + 容量の無駄のなさ
+                    score = abs(balance_pct - 15) + abs(total_vol - required_pv)/100
+                    
+                    found_plans.append({
+                        "rec_a": rec_a,
+                        "count_a": count_a,
+                        "rec_b": rec_b,
+                        "count_b": count_b,
+                        "total_vol": total_vol,
+                        "total_alb": total_alb,
+                        "balance": balance_pct,
+                        "score": score
+                    })
+
+# スコア順にソートしてベストを選択
+if found_plans:
+    found_plans.sort(key=lambda x: x["score"])
+    best_plan = found_plans[0]
+else:
+    # 条件に合うものが見つからない場合、最もマシなもの（標準セットのみ）をデフォルトにする安全策
+    def_rec = recipe_patterns[1] # Std-1
+    n = int(np.ceil(required_pv / def_rec["vol"]))
+    best_plan = {
+        "rec_a": def_rec, "count_a": n,
+        "rec_b": def_rec, "count_b": 0,
+        "total_vol": def_rec["vol"]*n, "total_alb": def_rec["alb_g"]*n,
+        "balance": (def_rec["alb_g"]*n / predicted_alb_loss_g - 1)*100 if predicted_alb_loss_g else 0,
+        "score": 999
+    }
+
+# 結果の展開
+rec_a = best_plan["rec_a"]
+count_a = best_plan["count_a"]
+rec_b = best_plan["rec_b"]
+count_b = best_plan["count_b"]
+actual_replacement_vol = best_plan["total_vol"]
+supplied_albumin_g = best_plan["total_alb"]
+balance_percent = best_plan["balance"]
+
 
 # --- 表示エリア ---
 st.title("選択的血漿交換 (SePE) シミュレーション")
 
-# メトリクス表示
 col1, col2, col3, col4 = st.columns(4)
-
-# 循環血漿量の表示に、使用した式と入力状況を明記
-bv_label_color = "off" if height == 0 else "normal"
 col1.metric("予測循環血漿量 (EPV)", f"{int(epv)} mL", f"{bv_method}")
-if height == 0:
-    col1.caption("※身長未入力のため簡易式を使用中")
-
 col2.metric("治療時間", f"{int(treatment_time_min)} 分", f"QP: {qp} mL/min")
 col3.metric(f"必要処理量 ({target_removal}%除去)", f"{int(required_pv)} mL", f"{required_pv/epv:.2f} × EPV")
-
-# アルブミンバランスの強調表示
-diff_alb = supplied_albumin_g - predicted_alb_loss_g
-col4.metric("アルブミン収支予測", f"{int(diff_alb):+d} g", f"補充:{int(supplied_albumin_g)}g / 喪失:{int(predicted_alb_loss_g)}g")
+col4.metric("アルブミン収支", f"{int(supplied_albumin_g - predicted_alb_loss_g):+d} g", f"補充:{int(supplied_albumin_g)}g (喪失+{balance_percent:.1f}%)")
 
 st.divider()
 
-# --- 画像と分析 ---
+# --- 画像と処方提案 ---
 c_img, c_info = st.columns([1, 1])
 
 with c_img:
@@ -115,28 +195,42 @@ with c_img:
         except:
             st.error("画像読み込みエラー")
     else:
-        st.info("※回路図画像がありません")
+        st.info("※回路図画像 (circuit.png) がありません")
 
 with c_info:
-    # ユーザー指摘事項への対策（原因分析と対策）
-    st.warning(f"⚠️ **分析: アルブミン補充過多の可能性**")
+    st.subheader("📋 補充液作成プラン (自動最適化)")
+    
+    # ロジックの説明
+    st.info(f"""
+    **計算根拠:**
+    * **予測喪失濃度:** 約 {avg_loss_conc:.2f}% ({predicted_alb_loss_g:.1f}g / {int(required_pv)}mL)
+    * **目標補充濃度:** {target_conc:.2f}% (喪失+15%設定)
+    * これに適合するよう、以下の組み合わせを提案します。
+    """)
+    
+    # パターンAの表示
+    if count_a > 0:
+        st.markdown(f"""
+        #### 🅰️ パターンA: {rec_a['name']} ({rec_a['vol']}mL) × **{count_a}セット**
+        * **フィジオ140:** 500mLから **{rec_a['p_vol']}mL** を分取
+        * **20%アルブミン:** **{rec_a['alb_btl']}本** ({rec_a['alb_btl']*50}mL) 添加
+        """)
+        
+    # パターンBの表示 (あれば)
+    if count_b > 0:
+        st.markdown(f"""
+        #### 🅱️ パターンB: {rec_b['name']} ({rec_b['vol']}mL) × **{count_b}セット**
+        * **フィジオ140:** 500mLから **{rec_b['p_vol']}mL** を分取
+        * **20%アルブミン:** **{rec_b['alb_btl']}本** ({rec_b['alb_btl']*50}mL) 添加
+        """)
+        
+    st.markdown("---")
     st.markdown(f"""
-    **現状の乖離:**
-    * **予測喪失量:** 約 {int(predicted_alb_loss_g)} g
-    * **必要補充量:** {int(supplied_albumin_g)} g
-    * **収支バランス:** <span style="color:red">**+{int(diff_alb)} g のプラスバランス**</span>
-    
-    **原因:**
-    SePEではアルブミンが部分的に体内に残るため、排液中のアルブミン濃度は低くなります。
-    対して、現在の補充液レシピは濃度が高いため、等量置換すると過剰になります。
-    * **排液中のAlb濃度:** 約 {filtrate_alb_conc:.1f} g/dL (体内 {alb_initial} × SC {sc_albumin})
-    * **補充液のAlb濃度:** 約 {repl_alb_conc:.1f} g/dL (20%製剤 50mL + 生食等 140mL)
-    
-    **対策 (Clinical Action):**
-    実際の治療では、以下の調整が検討されます。
-    1.  **アルブミン製剤の間引き:** 全てのボトルに入れず、2回に1回にする等で総量を調整する。
-    2.  **低濃度レシピへの変更:** SePE専用の低濃度アルブミン溶液を使用する。
-    """, unsafe_allow_html=True)
+    **合計準備数:**
+    * **フィジオ140 (500mL):** {count_a + count_b} 袋
+    * **20%アルブミン (50mL):** {count_a*rec_a['alb_btl'] + count_b*rec_b['alb_btl']} 本
+    * **総液量:** {actual_replacement_vol} mL (対処理量 {actual_replacement_vol/required_pv*100:.0f}%)
+    """)
 
 st.divider()
 
@@ -157,7 +251,6 @@ ax1.tick_params(axis='y', labelcolor=color_1)
 ax1.grid(True, linestyle='--', alpha=0.5)
 ax1.set_ylim(0, 105)
 
-# 目標点プロット
 ax1.scatter([required_pv], [100 - target_removal], color='red', s=100, zorder=5)
 ax1.annotate(f'目標達成\n{int(required_pv)}mL処理\n(残存{100-target_removal}%)',
              xy=(required_pv, 100 - target_removal), 
@@ -174,14 +267,13 @@ line2 = ax2.plot(v_process, alb_loss_curve, color=color_2, linestyle='--', linew
 ax2.tick_params(axis='y', labelcolor=color_2)
 ax2.set_ylim(0, max(alb_loss_curve)*1.2)
 
-# 凡例配置
 lines = line1 + line2
 labels = [l.get_label() for l in lines]
 ax1.legend(lines, labels, loc='upper center', bbox_to_anchor=(0.5, -0.15), ncol=2, fontsize=11, frameon=False)
 plt.tight_layout()
 st.pyplot(fig)
 
-# --- 詳細な用語解説・根拠 ---
+# --- 解説 ---
 st.divider()
 st.header("用語解説・計算根拠")
 
@@ -200,16 +292,12 @@ with st.expander("2. Evacure EC-4A10c のSC設定と安全域", expanded=True):
     * **アルブミン:** 喪失過多を防ぐため、SCを**高め**に見積もり、補充計画を立てます。
     """)
 
-with st.expander("3. 循環血漿量・必要処理量の計算根拠", expanded=True):
-    st.markdown(r"""
-    **A. 予測循環血漿量 (EPV)**
-    * **身長入力あり:** 小川の式 (Ogawa's Formula) を使用。
-      $$ BV(L) = 0.16874 \times Height(m) + 0.05986 \times Weight(kg) - 0.0305 $$
-    * **身長入力なし:** 簡易式 ($70mL/kg$) を使用。
-    * 血漿量算出: $EPV = BV \times (1 - Hct/100)$
-
-    **B. 必要な血漿処理量 (Required PV)**
-    ワンコンパートメントモデル（Washout）に基づく計算：
-    $$ V = \frac{- \ln(1 - R) \times EPV}{SC_{pathogen}} $$
-    ($R$: 除去目標率 0.0~1.0, $V$: 処理量)
+with st.expander("3. 補充液レシピの自動設計ロジック (新)", expanded=True):
+    st.markdown("""
+    **濃度逆算アプローチ:**
+    1.  **予測喪失濃度**を算出 ($= \text{予測喪失量} / \text{必要処理量}$)
+    2.  これに対し、**+15%の安全マージン**を乗せた目標濃度を設定します。
+    3.  **組み合わせ最適化:** * フィジオ+Alb1本 (1.8%~2.5%)
+        * フィジオ+Alb2本 (3.6%~5.0%)
+        これらのプリセットから、目標濃度と総液量に最も合致する組み合わせ（例: Aセット4回 + Bセット2回）を自動算出します。
     """)
